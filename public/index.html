@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FHIR Patient Summary MCP Server</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:#0f1117; --bg2:#161b27; --bg3:#1e2536;
+      --border:rgba(255,255,255,0.08); --text:#e8eaf0; --muted:#8b94a8;
+      --accent:#4f8ef7; --teal:#20c997; --coral:#ff6b6b;
+      --amber:#ffa94d; --purple:#9775fa; --green:#69db7c;
+      --pink:#f783ac; --blue:#74c0fc;
+    }
+    body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif; background:var(--bg); color:var(--text); line-height:1.6; }
+
+    .hero { background:linear-gradient(135deg,#0f1117 0%,#162035 50%,#0f1117 100%); border-bottom:1px solid var(--border); padding:72px 24px 64px; text-align:center; position:relative; overflow:hidden; }
+    .hero::before { content:''; position:absolute; top:-60px; left:50%; transform:translateX(-50%); width:600px; height:600px; background:radial-gradient(circle,rgba(79,142,247,.12) 0%,transparent 70%); pointer-events:none; }
+    .badge { display:inline-flex; align-items:center; gap:6px; background:rgba(79,142,247,.12); border:1px solid rgba(79,142,247,.3); border-radius:100px; padding:4px 14px; font-size:12px; color:var(--accent); font-weight:500; margin-bottom:24px; letter-spacing:.04em; }
+    .dot { width:6px; height:6px; background:var(--teal); border-radius:50%; animation:pulse 2s ease-in-out infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+    .hero h1 { font-size:clamp(2rem,5vw,3.2rem); font-weight:700; letter-spacing:-.02em; background:linear-gradient(135deg,#e8eaf0 0%,#74c0fc 50%,#38d9a9 100%); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; margin-bottom:16px; }
+    .hero p { font-size:1.1rem; color:var(--muted); max-width:600px; margin:0 auto 32px; }
+    .chips { display:flex; gap:10px; justify-content:center; flex-wrap:wrap; }
+    .chip { background:var(--bg3); border:1px solid var(--border); border-radius:8px; padding:6px 14px; font-size:13px; color:var(--muted); font-family:'SF Mono','Fira Code',monospace; }
+    .chip strong { color:var(--text); }
+
+    .section { max-width:1100px; margin:0 auto; padding:64px 24px; }
+    .section-label { font-size:11px; font-weight:600; letter-spacing:.12em; color:var(--accent); text-transform:uppercase; margin-bottom:8px; }
+    h2 { font-size:1.9rem; font-weight:700; letter-spacing:-.02em; margin-bottom:12px; }
+    .sub { color:var(--muted); margin-bottom:48px; max-width:600px; }
+
+    .sharp-box { background:linear-gradient(135deg,rgba(56,217,169,.05),rgba(79,142,247,.05)); border:1px solid rgba(56,217,169,.2); border-radius:16px; padding:32px; margin-bottom:64px; }
+    .sharp-box h3 { font-size:1.1rem; font-weight:600; color:var(--teal); margin-bottom:12px; display:flex; align-items:center; gap:8px; }
+    .sharp-box p { color:var(--muted); margin-bottom:20px; font-size:.95rem; }
+    .hgrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:12px; }
+    .hcard { background:var(--bg2); border:1px solid var(--border); border-radius:10px; padding:14px 18px; }
+    .hname { font-family:'SF Mono','Fira Code',monospace; font-size:12px; color:var(--amber); margin-bottom:4px; font-weight:600; }
+    .hdesc { font-size:12px; color:var(--muted); }
+
+    .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(460px,1fr)); gap:20px; }
+    @media(max-width:540px){.grid{grid-template-columns:1fr;}}
+
+    .card { background:var(--bg2); border:1px solid var(--border); border-radius:16px; padding:28px; transition:border-color .2s,transform .2s; position:relative; overflow:hidden; }
+    .card:hover { border-color:rgba(255,255,255,.15); transform:translateY(-2px); }
+    .card::before { content:''; position:absolute; top:0; left:0; right:0; height:2px; background:var(--ca,var(--accent)); }
+
+    .thead { display:flex; align-items:flex-start; gap:14px; margin-bottom:16px; }
+    .icon { width:44px; height:44px; border-radius:12px; display:flex; align-items:center; justify-content:center; font-size:22px; flex-shrink:0; background:var(--ib,rgba(79,142,247,.12)); }
+    .tmeta { flex:1; min-width:0; }
+    .tnum { font-size:10px; font-weight:600; letter-spacing:.1em; color:var(--muted); text-transform:uppercase; margin-bottom:2px; }
+    .tname { font-family:'SF Mono','Fira Code',monospace; font-size:.97rem; font-weight:600; color:var(--text); word-break:break-all; }
+    .tdesc { color:var(--muted); font-size:.88rem; margin-bottom:16px; line-height:1.6; }
+    .rl { font-size:11px; font-weight:600; letter-spacing:.08em; color:var(--muted); text-transform:uppercase; margin-bottom:8px; }
+    .tags { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:14px; }
+    .tag { background:var(--bg3); border:1px solid var(--border); border-radius:6px; padding:3px 10px; font-size:12px; color:var(--text); }
+    .ftags { display:flex; flex-wrap:wrap; gap:5px; }
+    .ftag { font-family:'SF Mono','Fira Code',monospace; font-size:11px; padding:2px 8px; border-radius:5px; background:rgba(79,142,247,.1); color:var(--blue); border:1px solid rgba(79,142,247,.2); }
+
+    .ep { background:var(--bg2); border:1px solid var(--border); border-radius:16px; padding:32px; margin-bottom:24px; }
+    .ep h3 { font-size:1rem; font-weight:600; margin-bottom:16px; }
+    .code { background:var(--bg); border:1px solid var(--border); border-radius:10px; padding:20px; font-family:'SF Mono','Fira Code',monospace; font-size:13px; line-height:1.8; overflow-x:auto; }
+    .kw{color:var(--purple)} .str{color:var(--green)} .prop{color:var(--blue)} .cmt{color:var(--muted);font-style:italic} .method{color:var(--coral)} .url{color:var(--amber)}
+
+    footer { border-top:1px solid var(--border); padding:32px 24px; text-align:center; color:var(--muted); font-size:.85rem; }
+    footer a { color:var(--accent); text-decoration:none; }
+  </style>
+</head>
+<body>
+
+<section class="hero">
+  <div class="badge"><span class="dot"></span>SHARP-Compliant · Prompt Opinion · Python + FastAPI</div>
+  <h1>FHIR Patient Summary<br>MCP Server</h1>
+  <p>7 clinical data tools that give AI agents instant, structured access to a patient's complete health record — powered by FHIR R4 and the SHARP context protocol.</p>
+  <div class="chips">
+    <div class="chip"><strong>Python</strong> FastAPI</div>
+    <div class="chip"><strong>MCP</strong> Streamable HTTP</div>
+    <div class="chip"><strong>POST</strong> /mcp</div>
+    <div class="chip"><strong>FHIR</strong> R4</div>
+    <div class="chip"><strong>7</strong> tools</div>
+  </div>
+</section>
+
+<div class="section">
+
+  <div class="sharp-box">
+    <h3>
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      SHARP Context — How it works
+    </h3>
+    <p>When Prompt Opinion calls any tool on this server, it automatically fires three HTTP headers with the patient's FHIR context. The server reads them and queries the FHIR server on behalf of the agent — no manual auth code required.</p>
+    <div class="hgrid">
+      <div class="hcard"><div class="hname">X-FHIR-Server-URL</div><div class="hdesc">Base URL of the FHIR server (Epic, Cerner, HAPI, etc.)</div></div>
+      <div class="hcard"><div class="hname">X-FHIR-Access-Token</div><div class="hdesc">Bearer token with patient-scoped SMART on FHIR permissions</div></div>
+      <div class="hcard"><div class="hname">X-Patient-ID</div><div class="hdesc">The FHIR patient resource ID used to scope all queries</div></div>
+    </div>
+  </div>
+
+  <div class="section-label">MCP Tools</div>
+  <h2>7 Clinical Data Layers</h2>
+  <p class="sub">Each tool queries one clinical layer of the patient record and returns structured JSON — ready for an AI agent to narrate, reason over, or compose into a full patient briefing.</p>
+
+  <div class="grid">
+
+    <div class="card" style="--ca:#74c0fc;--ib:rgba(116,192,252,.12)">
+      <div class="thead"><div class="icon">🪪</div><div class="tmeta"><div class="tnum">Tool 01</div><div class="tname">get_patient_summary</div></div></div>
+      <p class="tdesc">Complete demographic and identity record — who they are, where they live, how to contact them, and key administrative attributes like language, race, and MRN.</p>
+      <div class="rl">Returns</div>
+      <div class="tags"><span class="tag">Full name & DOB</span><span class="tag">Gender & age</span><span class="tag">Address & phone</span><span class="tag">Language</span><span class="tag">Race & ethnicity</span><span class="tag">MRN</span></div>
+      <div class="rl">FHIR resources</div>
+      <div class="ftags"><span class="ftag">Patient</span></div>
+    </div>
+
+    <div class="card" style="--ca:#38d9a9;--ib:rgba(56,217,169,.12)">
+      <div class="thead"><div class="icon">🩺</div><div class="tmeta"><div class="tnum">Tool 02</div><div class="tname">get_clinical_records</div></div></div>
+      <p class="tdesc">Full clinical history — all diagnoses (active and resolved), allergies and intolerances with reaction severity, procedures performed, and hereditary family history.</p>
+      <div class="rl">Returns</div>
+      <div class="tags"><span class="tag">Active diagnoses</span><span class="tag">Resolved conditions</span><span class="tag">Allergies & reactions</span><span class="tag">Procedures</span><span class="tag">Family history</span></div>
+      <div class="rl">FHIR resources</div>
+      <div class="ftags"><span class="ftag">Condition</span><span class="ftag">AllergyIntolerance</span><span class="ftag">Procedure</span><span class="ftag">FamilyMemberHistory</span></div>
+    </div>
+
+    <div class="card" style="--ca:#ff6b6b;--ib:rgba(255,107,107,.12)">
+      <div class="thead"><div class="icon">💊</div><div class="tmeta"><div class="tnum">Tool 03</div><div class="tname">get_medications</div></div></div>
+      <p class="tdesc">Complete medication picture — what was prescribed, what the patient says they take, what was given clinically, and what the pharmacy dispensed.</p>
+      <div class="rl">Returns</div>
+      <div class="tags"><span class="tag">Active prescriptions</span><span class="tag">Historical prescriptions</span><span class="tag">Reported medications</span><span class="tag">Administrations</span><span class="tag">Dispenses</span></div>
+      <div class="rl">FHIR resources</div>
+      <div class="ftags"><span class="ftag">MedicationRequest</span><span class="ftag">MedicationStatement</span><span class="ftag">MedicationAdministration</span><span class="ftag">MedicationDispense</span></div>
+    </div>
+
+    <div class="card" style="--ca:#ffa94d;--ib:rgba(255,169,77,.12)">
+      <div class="thead"><div class="icon">🔬</div><div class="tmeta"><div class="tnum">Tool 04</div><div class="tname">get_diagnostics</div></div></div>
+      <p class="tdesc">Full diagnostic picture — recent vitals, lab results with automatic abnormal flags, diagnostic reports, imaging studies with DICOM references, and complete vaccination history.</p>
+      <div class="rl">Returns</div>
+      <div class="tags"><span class="tag">Recent vitals</span><span class="tag">Lab results</span><span class="tag">⚠ Abnormal flags</span><span class="tag">Diagnostic reports</span><span class="tag">Imaging studies</span><span class="tag">Immunizations</span></div>
+      <div class="rl">FHIR resources</div>
+      <div class="ftags"><span class="ftag">Observation</span><span class="ftag">DiagnosticReport</span><span class="ftag">ImagingStudy</span><span class="ftag">Immunization</span></div>
+    </div>
+
+    <div class="card" style="--ca:#69db7c;--ib:rgba(105,219,124,.12)">
+      <div class="thead"><div class="icon">📋</div><div class="tmeta"><div class="tnum">Tool 05</div><div class="tname">get_care_plan</div></div></div>
+      <p class="tdesc">Forward-looking care picture — structured care plans, measurable clinical goals, active referrals and service orders, questionnaire responses, and nutrition orders.</p>
+      <div class="rl">Returns</div>
+      <div class="tags"><span class="tag">Care plans</span><span class="tag">Clinical goals</span><span class="tag">Referrals & orders</span><span class="tag">Questionnaire data</span><span class="tag">Nutrition orders</span></div>
+      <div class="rl">FHIR resources</div>
+      <div class="ftags"><span class="ftag">CarePlan</span><span class="ftag">Goal</span><span class="ftag">ServiceRequest</span><span class="ftag">QuestionnaireResponse</span><span class="ftag">NutritionOrder</span></div>
+    </div>
+
+    <div class="card" style="--ca:#9775fa;--ib:rgba(151,117,250,.12)">
+      <div class="thead"><div class="icon">🏥</div><div class="tmeta"><div class="tnum">Tool 06</div><div class="tname">get_encounters</div></div></div>
+      <p class="tdesc">Complete visit timeline — every inpatient stay, outpatient visit, and emergency encounter, plus episodes of care and upcoming or past appointments.</p>
+      <div class="rl">Returns</div>
+      <div class="tags"><span class="tag">Recent encounters</span><span class="tag">Inpatient / Outpatient / ER</span><span class="tag">Episodes of care</span><span class="tag">Upcoming appointments</span></div>
+      <div class="rl">FHIR resources</div>
+      <div class="ftags"><span class="ftag">Encounter</span><span class="ftag">EpisodeOfCare</span><span class="ftag">Appointment</span></div>
+    </div>
+
+    <div class="card" style="--ca:#f783ac;--ib:rgba(247,131,172,.12)">
+      <div class="thead"><div class="icon">📄</div><div class="tmeta"><div class="tnum">Tool 07</div><div class="tname">get_documents</div></div></div>
+      <p class="tdesc">Clinical document library — discharge summaries, clinical notes, referral letters, and structured compositions with section-level text previews (HTML stripped).</p>
+      <div class="rl">Returns</div>
+      <div class="tags"><span class="tag">Clinical notes</span><span class="tag">Discharge summaries</span><span class="tag">Referral letters</span><span class="tag">Compositions</span></div>
+      <div class="rl">FHIR resources</div>
+      <div class="ftags"><span class="ftag">DocumentReference</span><span class="ftag">Composition</span></div>
+    </div>
+
+  </div>
+
+  <!-- Endpoint reference -->
+  <div style="margin-top:64px">
+    <div class="section-label">Integration</div>
+    <h2>Endpoint reference</h2>
+    <p class="sub">Connect this server to Prompt Opinion or any MCP-compatible client using the Streamable HTTP transport.</p>
+
+    <div class="ep">
+      <h3>MCP endpoint</h3>
+      <div class="code">
+        <span class="method">POST</span> <span class="url">https://fhir-mcp-server.onrender.com/mcp</span><br><br>
+        <span class="cmt"># SHARP headers (auto-injected by Prompt Opinion)</span><br>
+        <span class="prop">X-FHIR-Server-URL</span>:     <span class="str">https://fhir.example.com/r4</span><br>
+        <span class="prop">X-FHIR-Access-Token</span>:  <span class="str">eyJhbGci...</span><br>
+        <span class="prop">X-Patient-ID</span>:          <span class="str">8f381b07-6423-a4b3-5f68-c5a635861339</span><br>
+        <span class="prop">Content-Type</span>:          <span class="str">application/json</span>
+      </div>
+    </div>
+
+    <div class="ep">
+      <h3>Health check</h3>
+      <div class="code">
+        <span class="method">GET</span> <span class="url">https://fhir-mcp-server.onrender.com/health</span><br><br>
+        {<br>
+        &nbsp;&nbsp;<span class="prop">"status"</span>: <span class="str">"ok"</span>,<br>
+        &nbsp;&nbsp;<span class="prop">"server"</span>: <span class="str">"fhir-patient-summary-mcp"</span>,<br>
+        &nbsp;&nbsp;<span class="prop">"tools"</span>: [<span class="str">"get_patient_summary"</span>, <span class="str">"get_clinical_records"</span>, ...]<br>
+        }
+      </div>
+    </div>
+
+    <div class="ep">
+      <h3>Example — list available tools</h3>
+      <div class="code">
+        <span class="kw">curl</span> -X POST https://fhir-mcp-server.onrender.com/mcp \<br>
+        &nbsp;&nbsp;-H <span class="str">"Content-Type: application/json"</span> \<br>
+        &nbsp;&nbsp;-H <span class="str">"X-FHIR-Server-URL: https://hapi.fhir.org/baseR4"</span> \<br>
+        &nbsp;&nbsp;-H <span class="str">"X-FHIR-Access-Token: open"</span> \<br>
+        &nbsp;&nbsp;-H <span class="str">"X-Patient-ID: example-patient-123"</span> \<br>
+        &nbsp;&nbsp;-d <span class="str">'{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'</span>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<footer>
+  Built for the <a href="https://agents-assemble.devpost.com" target="_blank">Agents Assemble hackathon</a> · Prompt Opinion · SHARP on MCP · Python + FastAPI
+</footer>
+
+</body>
+</html>
