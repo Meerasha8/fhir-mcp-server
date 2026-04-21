@@ -2,28 +2,25 @@
 # FHIR Patient Summary MCP Server — SHARP-compliant
 # Prompt Opinion · Agents Assemble Hackathon
 #
-# Uses fastmcp (pip install fastmcp>=2.9.0)
-#
-# HOW IT WORKS:
-#   mcp.run(transport="http") starts uvicorn internally.
-#   FastMCP automatically creates the MCP endpoint at /mcp
-#   Custom routes /health and / are added via @mcp.custom_route()
-#   SHARP headers are read per-request via ASGI middleware → ContextVar
+# KEY FIX: Injects the "ai.promptopinion/fhir-context" extension into
+# every MCP initialize response. Prompt Opinion checks for this during
+# the handshake to confirm FHIR context is supported.
 #
 # Endpoints:
-#   POST http://host:8000/mcp   ← MCP endpoint (Prompt Opinion connects here)
+#   POST http://host:8000/mcp   ← MCP endpoint
 #   GET  http://host:8000/health ← health check
 #   GET  http://host:8000/       ← HTML docs page
 
 from __future__ import annotations
 import os
+import json
 from contextvars import ContextVar
 
 from fastmcp import FastMCP
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, FileResponse
+from starlette.responses import JSONResponse, FileResponse, Response
 
 from fhir_client import SharpContext, extract_sharp_context
 from tools.patient_summary  import get_patient_summary
@@ -35,50 +32,173 @@ from tools.encounters       import get_encounters
 from tools.documents        import get_documents
 
 # ── Per-request SHARP context ─────────────────────────────────────────────────
-# MCP tool functions cannot receive HTTP request objects.
-# We thread the SHARP headers through a ContextVar so tools can call _get_ctx().
 _sharp_ctx: ContextVar[SharpContext | None] = ContextVar("_sharp_ctx", default=None)
-
 
 def _get_ctx() -> SharpContext:
     ctx = _sharp_ctx.get()
     if ctx is None:
         raise RuntimeError(
-            "SHARP context missing — send these headers: "
+            "SHARP context missing — send: "
             "X-FHIR-Server-URL, X-FHIR-Access-Token, X-Patient-ID"
         )
     return ctx
 
 
-# ── ASGI middleware: extract SHARP headers per request ────────────────────────
-class SharpContextMiddleware:
+# ── Prompt Opinion FHIR extension middleware ──────────────────────────────────
+# Intercepts MCP initialize responses and injects the
+# "ai.promptopinion/fhir-context" extension into capabilities.
+# This is what makes Prompt Opinion show the FHIR trust dialog.
+
+FHIR_EXTENSION = {
+    "ai.promptopinion/fhir-context": {
+        "scopes": [
+            {"name": "patient/Patient.rs",          "required": True},
+            {"name": "patient/Condition.rs",         "required": False},
+            {"name": "patient/AllergyIntolerance.rs","required": False},
+            {"name": "patient/Procedure.rs",         "required": False},
+            {"name": "patient/Observation.rs",       "required": False},
+            {"name": "patient/MedicationRequest.rs", "required": False},
+            {"name": "patient/MedicationStatement.rs","required": False},
+            {"name": "patient/DiagnosticReport.rs",  "required": False},
+            {"name": "patient/Immunization.rs",      "required": False},
+            {"name": "patient/Encounter.rs",         "required": False},
+            {"name": "patient/DocumentReference.rs", "required": False},
+            {"name": "patient/CarePlan.rs",          "required": False},
+            {"name": "patient/Goal.rs",              "required": False},
+        ]
+    }
+}
+
+
+class PromptOpinionFhirMiddleware:
+    """
+    ASGI middleware that:
+    1. Extracts SHARP headers (X-FHIR-*) into a ContextVar for tool use.
+    2. For MCP initialize requests, patches the JSON response to include
+       the ai.promptopinion/fhir-context extension in capabilities.
+    """
+
     def __init__(self, app):
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] in ("http", "websocket"):
-            headers = {
-                k.decode("latin-1"): v.decode("latin-1")
-                for k, v in scope.get("headers", [])
-            }
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        # Decode headers
+        headers = {
+            k.decode("latin-1").lower(): v.decode("latin-1")
+            for k, v in scope.get("headers", [])
+        }
+
+        # Inject SHARP context
+        try:
+            ctx = extract_sharp_context(headers)
+            token = _sharp_ctx.set(ctx)
+        except ValueError:
+            token = _sharp_ctx.set(None)
+
+        # Check if this is an MCP initialize request (needs extension injection)
+        is_mcp_init = False
+        path = scope.get("path", "")
+        if path.rstrip("/") == "/mcp":
+            body_chunks = []
+
+            async def receive_with_body():
+                msg = await receive()
+                if msg["type"] == "http.request":
+                    body_chunks.append(msg.get("body", b""))
+                return msg
+
+            # Peek at the body to detect initialize
+            first_msg = await receive()
+            body = first_msg.get("body", b"")
+            if first_msg.get("more_body"):
+                while True:
+                    chunk = await receive()
+                    body += chunk.get("body", b"")
+                    if not chunk.get("more_body"):
+                        break
+
             try:
-                ctx = extract_sharp_context(headers)
-                token = _sharp_ctx.set(ctx)
-            except ValueError:
-                token = _sharp_ctx.set(None)
-            try:
-                await self.app(scope, receive, send)
-            finally:
-                _sharp_ctx.reset(token)
+                payload = json.loads(body)
+                if payload.get("method") == "initialize":
+                    is_mcp_init = True
+            except (json.JSONDecodeError, AttributeError):
+                pass
+
+            # Replay the body back to the app
+            body_sent = False
+
+            async def replay_receive():
+                nonlocal body_sent
+                if not body_sent:
+                    body_sent = True
+                    return {"type": "http.request", "body": body, "more_body": False}
+                return await receive()
+
+            if is_mcp_init:
+                # Capture the response so we can patch it
+                response_started = False
+                response_headers = []
+                response_status = 200
+                response_body = b""
+
+                async def capture_send(message):
+                    nonlocal response_started, response_headers, response_status, response_body
+                    if message["type"] == "http.response.start":
+                        response_started = True
+                        response_status = message.get("status", 200)
+                        response_headers = list(message.get("headers", []))
+                    elif message["type"] == "http.response.body":
+                        response_body += message.get("body", b"")
+
+                await self.app(scope, replay_receive, capture_send)
+
+                # Patch the response body
+                patched_body = self._patch_initialize_response(response_body)
+
+                # Update Content-Length header
+                patched_headers = []
+                for name, value in response_headers:
+                    if name.lower() == b"content-length":
+                        patched_headers.append((b"content-length", str(len(patched_body)).encode()))
+                    else:
+                        patched_headers.append((name, value))
+
+                await send({
+                    "type": "http.response.start",
+                    "status": response_status,
+                    "headers": patched_headers,
+                })
+                await send({
+                    "type": "http.response.body",
+                    "body": patched_body,
+                    "more_body": False,
+                })
+            else:
+                await self.app(scope, replay_receive, send)
         else:
             await self.app(scope, receive, send)
 
+        _sharp_ctx.reset(token)
+
+    def _patch_initialize_response(self, body: bytes) -> bytes:
+        """Inject ai.promptopinion/fhir-context into the capabilities.extensions."""
+        try:
+            data = json.loads(body)
+            result = data.setdefault("result", {})
+            capabilities = result.setdefault("capabilities", {})
+            extensions = capabilities.setdefault("extensions", {})
+            extensions.update(FHIR_EXTENSION)
+            return json.dumps(data).encode()
+        except Exception:
+            return body
+
 
 # ── FastMCP server ─────────────────────────────────────────────────────────────
-mcp = FastMCP(
-    name="FHIR Patient Summary MCP Server",
-    # Middleware list passed to http_app internally by mcp.run()
-)
+mcp = FastMCP(name="FHIR Patient Summary MCP Server")
 
 
 # ── 7 Tools ───────────────────────────────────────────────────────────────────
@@ -156,6 +276,7 @@ async def health(request: Request) -> JSONResponse:
         "server": "fhir-patient-summary-mcp",
         "version": "1.0.0",
         "mcp_endpoint": "/mcp",
+        "fhir_extension": "ai.promptopinion/fhir-context",
         "sharp_headers_required": [
             "X-FHIR-Server-URL",
             "X-FHIR-Access-Token",
@@ -174,7 +295,7 @@ async def health(request: Request) -> JSONResponse:
 
 
 @mcp.custom_route("/", methods=["GET"])
-async def docs(request: Request) -> FileResponse | JSONResponse:
+async def docs(request: Request) -> Response:
     index = os.path.join(PUBLIC_DIR, "index.html")
     if os.path.exists(index):
         return FileResponse(index)
@@ -185,9 +306,7 @@ async def docs(request: Request) -> FileResponse | JSONResponse:
     })
 
 
-# ── ASGI app (used by uvicorn on Render) ─────────────────────────────────────
-# Build the ASGI app with CORS + SHARP middleware.
-# Render calls `uvicorn server:app` so we expose `app` at module level.
+# ── Build ASGI app ────────────────────────────────────────────────────────────
 _cors = Middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -196,17 +315,14 @@ _cors = Middleware(
     expose_headers=["mcp-session-id"],
 )
 
-# http_app() creates the ASGI app; mcp endpoint is at /mcp automatically
-app = mcp.http_app(
-    stateless_http=True,
-    middleware=[_cors],
-)
+# FastMCP ASGI app — /mcp endpoint is created automatically
+_mcp_asgi = mcp.http_app(stateless_http=True, middleware=[_cors])
 
-# Wrap with our SHARP context middleware (outermost layer)
-app = SharpContextMiddleware(app)
+# Wrap with our middleware (outermost: handles SHARP + initialize patching)
+app = PromptOpinionFhirMiddleware(_mcp_asgi)
 
 
-# ── Entry point (local dev) ───────────────────────────────────────────────────
+# ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
